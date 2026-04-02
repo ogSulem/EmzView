@@ -2,10 +2,13 @@ services:
   mongo:
     image: mongo:6
     container_name: emz-mongo
+    restart: always
     ports:
       - "27017:27017"
     volumes:
       - mongo_data:/data/db
+    networks:
+      - emz-net
 
   ollama:
     image: ollama/ollama:latest

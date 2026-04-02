@@ -4,6 +4,8 @@ import dotenv from 'dotenv';
 import morgan from 'morgan';
 import logger from './lib/logger.js';
 import rateLimit from 'express-rate-limit';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 import { connectMongo } from './lib/mongo.js';
 import { errorHandler, notFoundHandler } from './middleware/errors.js';
@@ -12,10 +14,17 @@ import { moviesRouter } from './routes/movies.js';
 import { actionsRouter } from './routes/actions.js';
 import { recommendationsRouter } from './routes/recommendations.js';
 import { usersRouter } from './routes/users.js';
+import { devRouter } from './routes/dev.js';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 dotenv.config();
 
 const app = express();
+
+app.disable('etag');
 
 app.use(express.json({ limit: '1mb' }));
 
@@ -30,6 +39,11 @@ app.use(
     credentials: true,
   })
 );
+
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
 
 app.use(
   rateLimit({
@@ -49,6 +63,7 @@ app.use('/api/movies', moviesRouter);
 app.use('/api/actions', actionsRouter);
 app.use('/api/recommendations', recommendationsRouter);
 app.use('/api/users', usersRouter);
+app.use('/api/dev', devRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

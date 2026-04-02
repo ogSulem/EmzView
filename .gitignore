@@ -7,4 +7,8 @@
 **/dist
 **/build
 **/.DS_Store
+*.log
+.idea/
+.vscode/
+/package-lock.json
 mongo_data

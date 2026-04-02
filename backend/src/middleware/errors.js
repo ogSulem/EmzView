@@ -6,6 +6,10 @@ export function errorHandler(err, req, res, next) {
   // eslint-disable-next-line no-console
   console.error(err);
 
+  if (err?.name === 'ZodError') {
+    return res.status(400).json({ error: 'Некорректные данные' });
+  }
+
   const status = err.statusCode ?? 500;
   const message = err.expose ? err.message : 'Internal Server Error';
 

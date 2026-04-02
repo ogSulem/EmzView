@@ -8,6 +8,7 @@ import { requireAuth } from '../middleware/auth.js';
 export const moviesRouter = Router();
 
 const genresCache = new Map();
+const listsCache = new Map();
 
 async function ensureMovie({ tmdbId, mediaType }) {
   const existing = await Movie.findOne({ tmdbId, mediaType });
@@ -77,6 +78,50 @@ moviesRouter.get('/search', requireAuth, async (req, res, next) => {
   }
 });
 
+moviesRouter.get('/lists/:kind', requireAuth, async (req, res, next) => {
+  try {
+    const mediaType = z.enum(['movie', 'tv']).default('movie').parse(req.query.type ?? 'movie');
+    const kind = z.enum(['trending', 'popular', 'top', 'now']).parse(req.params.kind);
+    const limit = z.coerce.number().int().min(1).max(60).default(20).parse(req.query.limit ?? 20);
+    const page = z.coerce.number().int().min(1).max(500).default(1).parse(req.query.page ?? 1);
+
+    const cacheKey = `lists:${kind}:${mediaType}:${page}:${limit}`;
+    const cached = listsCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return res.json(cached.value);
+    }
+
+    const tmdb = tmdbClient();
+
+    let endpoint = '';
+    if (kind === 'trending') endpoint = `/trending/${mediaType}/week`;
+    if (kind === 'popular') endpoint = mediaType === 'tv' ? '/tv/popular' : '/movie/popular';
+    if (kind === 'top') endpoint = mediaType === 'tv' ? '/tv/top_rated' : '/movie/top_rated';
+    if (kind === 'now') endpoint = mediaType === 'tv' ? '/tv/on_the_air' : '/movie/now_playing';
+
+    const { data } = await tmdb.get(endpoint, { params: { page } });
+
+    const items = (data?.results ?? []).slice(0, limit).map((r) => ({
+      tmdbId: r.id,
+      mediaType,
+      title: mediaType === 'tv' ? r.name : r.title,
+      overview: r.overview ?? '',
+      posterPath: r.poster_path ?? null,
+      posterUrl: posterUrl(r.poster_path),
+      releaseDate: mediaType === 'tv' ? r.first_air_date ?? null : r.release_date ?? null,
+      popularity: r.popularity ?? 0,
+      score: r.vote_average ?? null,
+    }));
+
+    const totalPages = Number.isFinite(data?.total_pages) ? data.total_pages : null;
+    const payload = { items, page, totalPages, kind, mediaType };
+    listsCache.set(cacheKey, { value: payload, expiresAt: Date.now() + 5 * 60 * 1000 });
+    return res.json(payload);
+  } catch (err) {
+    return next(err);
+  }
+});
+
 moviesRouter.get('/genres', requireAuth, async (req, res, next) => {
   try {
     const mediaType = z.enum(['movie', 'tv']).default('movie').parse(req.query.type ?? 'movie');
@@ -106,6 +151,18 @@ const upsertSchema = z.object({
 moviesRouter.post('/ensure', requireAuth, async (req, res, next) => {
   try {
     const { tmdbId, mediaType } = upsertSchema.parse(req.body);
+
+    const movie = await ensureMovie({ tmdbId, mediaType });
+    return res.json({ movie: toMovieDto(movie) });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+moviesRouter.get('/:mediaType/:tmdbId', requireAuth, async (req, res, next) => {
+  try {
+    const mediaType = z.enum(['movie', 'tv']).parse(req.params.mediaType);
+    const tmdbId = z.coerce.number().int().positive().parse(req.params.tmdbId);
 
     const movie = await ensureMovie({ tmdbId, mediaType });
     return res.json({ movie: toMovieDto(movie) });

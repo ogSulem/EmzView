@@ -1,4 +1,7 @@
-from fastapi import FastAPI
+try:
+    from fastapi import FastAPI
+except ImportError:
+    from fastapi.applications import FastAPI
 
 from app.routers.recommend import router as recommend_router
 

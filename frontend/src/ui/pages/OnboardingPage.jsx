@@ -1,26 +1,106 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 
-import { api, setAuthToken } from '../lib/api.js';
-
-function randBetween(min, max) {
-  return Math.random() * (max - min) + min;
-}
+import { api, clearAuth, formatApiError, getStoredAuthToken, setAuthToken } from '../lib/api.js';
 
 export function OnboardingPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const [items, setItems] = useState([]);
   const [selected, setSelected] = useState(() => new Map());
-  const [genres, setGenres] = useState([]);
-  const [selectedGenreIds, setSelectedGenreIds] = useState(() => new Set());
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const minSelect = 12;
 
-  const wrapRef = useRef(null);
+  const sentinelRef = useRef(null);
+  const pagingRef = useRef({ page: 1, hasMore: true, loading: false, loadingMore: false });
+
+  const pageSize = 48;
+
+  const skeletonItems = Array.from({ length: 18 }).map((_, i) => ({ id: i }));
+
+  const resetSelected = useCallback(() => {
+    if (saving) return;
+    if (selected.size === 0) return;
+    const ok = window.confirm('Сбросить выбранные фильмы/сериалы?');
+    if (!ok) return;
+    setSelected(new Map());
+  }, [saving, selected]);
 
   useEffect(() => {
-    const token = localStorage.getItem('token');
-    if (token) setAuthToken(token);
+    const token = getStoredAuthToken();
+    if (!token) {
+      clearAuth({ redirectToLogin: true, includeNext: true });
+      return;
+    }
+
+    setAuthToken(token);
+
+    const params = new URLSearchParams(window.location.search);
+    const reset = params.get('reset') === '1';
+
+    let mounted = true;
+    (async () => {
+      try {
+        if (reset) {
+          await api.post('/api/users/onboarding/reset');
+        }
+        try {
+          const { data } = await api.get('/api/users/me');
+          const completedAt = data?.user?.onboarding?.completedAt;
+          if (mounted && completedAt && !reset) window.location.href = '/';
+        } catch (err) {
+          // ignore
+        }
+      } catch (err) {
+        // ignore
+      }
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const retryInitial = useCallback(() => {
+    if (loading) return;
+    setItems([]);
+    setPage(1);
+    setHasMore(true);
+    setError('');
+    setLoading(true);
+    api
+      .get(`/api/users/onboarding/candidates?limit=${pageSize}&page=1`)
+      .then((candidatesRes) => {
+        setItems(candidatesRes.data?.results ?? []);
+        setPage(candidatesRes.data?.page ?? 1);
+        setHasMore(Boolean(candidatesRes.data?.hasMore));
+      })
+      .catch((err) => {
+        setError(formatApiError(err, 'Не удалось загрузить кандидатов.'));
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  }, [loading, pageSize]);
+
+  useEffect(() => {
+    pagingRef.current = { page, hasMore, loading, loadingMore };
+  }, [page, hasMore, loading, loadingMore]);
+
+  const mergeCandidates = useCallback((prev, next) => {
+    const map = new Map();
+    for (const it of prev ?? []) {
+      const key = `${it.mediaType}:${it.tmdbId}`;
+      map.set(key, it);
+    }
+    for (const it of next ?? []) {
+      const key = `${it.mediaType}:${it.tmdbId}`;
+      if (!map.has(key)) map.set(key, it);
+    }
+    return Array.from(map.values());
   }, []);
 
   useEffect(() => {
@@ -29,24 +109,14 @@ export function OnboardingPage() {
       setError('');
       setLoading(true);
       try {
-        const [candidatesRes, movieGenresRes, tvGenresRes] = await Promise.all([
-          api.get('/api/users/onboarding/candidates?limit=48'),
-          api.get('/api/movies/genres?type=movie'),
-          api.get('/api/movies/genres?type=tv'),
-        ]);
+        const candidatesRes = await api.get(`/api/users/onboarding/candidates?limit=${pageSize}&page=1`);
         if (!mounted) return;
         setItems(candidatesRes.data?.results ?? []);
-
-        const merged = new Map();
-        for (const g of movieGenresRes.data?.genres ?? []) merged.set(g.id, g.name);
-        for (const g of tvGenresRes.data?.genres ?? []) merged.set(g.id, g.name);
-        const list = Array.from(merged.entries())
-          .map(([id, name]) => ({ id, name }))
-          .sort((a, b) => String(a.name).localeCompare(String(b.name), 'ru'));
-        setGenres(list);
+        setPage(candidatesRes.data?.page ?? 1);
+        setHasMore(Boolean(candidatesRes.data?.hasMore));
       } catch (err) {
         if (!mounted) return;
-        setError(err?.response?.data?.error ?? 'Failed to load onboarding candidates');
+        setError(formatApiError(err, 'Не удалось загрузить кандидатов.'));
       } finally {
         if (!mounted) return;
         setLoading(false);
@@ -59,18 +129,44 @@ export function OnboardingPage() {
     };
   }, []);
 
-  const placed = useMemo(() => {
-    const w = wrapRef.current?.clientWidth ?? 980;
-    const h = wrapRef.current?.clientHeight ?? 520;
+  const loadMore = useCallback(async () => {
+    const snap = pagingRef.current;
+    if (snap.loading || snap.loadingMore || !snap.hasMore) return;
+    pagingRef.current = { ...snap, loadingMore: true };
+    setLoadingMore(true);
+    setError('');
+    try {
+      const nextPage = (pagingRef.current.page ?? 1) + 1;
+      const res = await api.get(`/api/users/onboarding/candidates?limit=${pageSize}&page=${nextPage}`);
+      const more = res.data?.results ?? [];
+      setItems((prev) => mergeCandidates(prev, more));
+      setPage(res.data?.page ?? nextPage);
+      setHasMore(Boolean(res.data?.hasMore));
+    } catch (err) {
+      setError(formatApiError(err, 'Не удалось загрузить ещё кандидатов.'));
+    } finally {
+      pagingRef.current = { ...pagingRef.current, loadingMore: false };
+      setLoadingMore(false);
+    }
+  }, [mergeCandidates, pageSize]);
 
-    return (items ?? []).map((it) => {
-      const size = randBetween(70, 120);
-      const x = randBetween(0, Math.max(0, w - size));
-      const y = randBetween(0, Math.max(0, h - size));
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
 
-      return { ...it, _x: x, _y: y, _size: size };
-    });
-  }, [items]);
+    const obs = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return;
+        const { hasMore: hm, loading: l, loadingMore: lm } = pagingRef.current;
+        if (!hm || l || lm) return;
+        loadMore();
+      },
+      { root: null, rootMargin: '800px 0px', threshold: 0 }
+    );
+
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [loadMore]);
 
   function toggle(it) {
     setSelected((prev) => {
@@ -82,139 +178,113 @@ export function OnboardingPage() {
     });
   }
 
-  function toggleGenre(id) {
-    setSelectedGenreIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
   async function save() {
     if (saving) return;
     setError('');
     setSaving(true);
     try {
       const favorites = Array.from(selected.values()).map((x) => ({ tmdbId: x.tmdbId, mediaType: x.mediaType }));
-      const genreIds = Array.from(selectedGenreIds.values());
-      await api.put('/api/users/onboarding', { favorites, genreIds });
+      await api.put('/api/users/onboarding', { favorites });
       window.location.href = '/';
     } catch (err) {
-      setError(err?.response?.data?.error ?? 'Failed to save onboarding');
+      const status = err?.response?.status;
+      if (status === 401) setError('Сессия истекла. Войдите снова.');
+      else setError(err?.response?.data?.error ?? 'Не удалось сохранить выбор. Попробуйте ещё раз.');
     } finally {
       setSaving(false);
     }
   }
 
   const selectedCount = selected.size;
-  const selectedGenresCount = selectedGenreIds.size;
+  const showContinue = true;
+  const progress = Math.min(1, selectedCount / minSelect);
 
   return (
-    <div>
-      <div className="hero" style={{ marginBottom: 14 }}>
-        <h1 className="hero-title">Выбери любимые</h1>
-        <p className="hero-desc">
-          Кликни по кружкам с постерами, выбери 5–15 штук — и мы сразу настроим рекомендации.
-        </p>
+    <div className="onboarding-page">
+      <div className="u-mb14">
+        <div className="hero-actions hero-actions--g12 onboarding-header">
+          <div>
+            <h1 className="hero-title u-mb8">
+              Отметь любимое
+            </h1>
+            <p className="hero-desc">
+              Выбери минимум {minSelect} фильмов/сериалов — и мы соберем персональную ленту.
+            </p>
+          </div>
+        </div>
 
-        {genres.length ? (
-          <div style={{ marginTop: 10 }}>
-            <div className="small" style={{ marginBottom: 8 }}>
-              Жанры (опционально): выбери 0–8.
-            </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-              {genres.map((g) => {
-                const on = selectedGenreIds.has(g.id);
-                return (
-                  <button
-                    key={g.id}
-                    type="button"
-                    onClick={() => toggleGenre(g.id)}
-                    style={{
-                      borderRadius: 999,
-                      padding: '8px 10px',
-                      border: on ? '1px solid rgba(255,61,113,.85)' : '1px solid rgba(255,255,255,.14)',
-                      background: on ? 'rgba(255,61,113,.12)' : 'rgba(18,18,26,.35)',
-                      color: 'var(--text)',
-                      cursor: 'pointer',
-                      fontSize: 12,
-                      lineHeight: '12px',
-                    }}
-                    title={g.name}
-                  >
-                    {g.name}
-                  </button>
-                );
-              })}
-            </div>
-            <div className="small" style={{ marginTop: 8 }}>
-              Выбрано жанров: {selectedGenresCount}
+        <div className="small u-mt8">Выбери минимум {minSelect} — прогресс и сброс всегда доступны снизу.</div>
+        {error ? (
+          <div className="u-mt10">
+            <div className="error">{error}</div>
+            <div className="hero-actions hero-actions--mt12 hero-actions--g8">
+              <button className="btn" type="button" onClick={retryInitial} disabled={loading || saving}>
+                Повторить
+              </button>
             </div>
           </div>
         ) : null}
-
-        <div style={{ display: 'flex', gap: 10, marginTop: 12, alignItems: 'center' }}>
-          <button className="btn" onClick={save} disabled={saving || selectedCount < 3}>
-            {saving ? 'Сохраняю…' : `Продолжить (${selectedCount})`}
-          </button>
-          <div className="small">Минимум 3, лучше 8–15.</div>
-        </div>
-        {error ? <div className="error" style={{ marginTop: 10 }}>{error}</div> : null}
       </div>
 
-      <div
-        ref={wrapRef}
-        className="hero"
-        style={{
-          position: 'relative',
-          height: 540,
-          overflow: 'hidden',
-          padding: 10,
-        }}
-      >
-        {loading ? <div className="small">Загрузка…</div> : null}
-
-        {placed.map((it) => {
+      <div className="onboarding-grid">
+        {loading
+          ? skeletonItems.map((sk) => (
+              <div key={`sk-${sk.id}`} className="onboarding-item onboarding-item--skeleton" aria-hidden="true" />
+            ))
+          : (items ?? []).map((it) => {
           const key = `${it.mediaType}:${it.tmdbId}`;
           const isSelected = selected.has(key);
           return (
             <button
               key={key}
+              type="button"
+              className={`onboarding-item ${isSelected ? 'onboarding-item--selected' : ''}`}
               onClick={() => toggle(it)}
-              style={{
-                position: 'absolute',
-                left: it._x,
-                top: it._y,
-                width: it._size,
-                height: it._size,
-                borderRadius: 999,
-                border: isSelected ? '2px solid rgba(255,61,113,.95)' : '1px solid rgba(255,255,255,.14)',
-                background: 'rgba(18,18,26,.55)',
-                padding: 0,
-                cursor: 'pointer',
-                overflow: 'hidden',
-                boxShadow: isSelected ? '0 0 0 6px rgba(255,61,113,.18)' : 'none',
-                transform: isSelected ? 'scale(1.05)' : 'scale(1.0)',
-                transition: 'transform .12s ease, box-shadow .12s ease, border-color .12s ease',
-              }}
               title={it.title}
+              aria-pressed={isSelected}
             >
+              <div className="onboarding-overlay" aria-hidden="true" />
+              <div className="onboarding-badge">{it.mediaType === 'tv' ? 'Сериал' : 'Фильм'}</div>
+              {isSelected ? <div className="onboarding-check">✓</div> : null}
+              {isSelected ? <div className="onboarding-selectedPill">Выбрано</div> : null}
               {it.posterUrl ? (
-                <img src={it.posterUrl} alt={it.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                <img className="onboarding-poster" src={it.posterUrl} alt={it.title} loading="lazy" />
               ) : (
-                <div style={{ width: '100%', height: '100%', display: 'grid', placeItems: 'center', color: 'var(--muted)', fontSize: 10 }}>
-                  {it.title}
-                </div>
+                <div className="onboarding-fallback">{it.title}</div>
               )}
             </button>
           );
         })}
       </div>
 
-      <div className="small" style={{ marginTop: 12 }}>
-        Дальше я добавлю выбор жанров и тонкую настройку, но уже сейчас это даёт отличный cold-start.
-      </div>
+      <div ref={sentinelRef} className="u-h1" />
+      {loadingMore ? <div className="small u-mt12">Загружаю ещё…</div> : null}
+
+      {showContinue ? (
+        <div className="onboarding-sticky">
+          <div className="onboarding-sticky__meta">
+            <div className="onboarding-progress">
+              <div className="onboarding-progress__bar" style={{ width: `${Math.round(progress * 100)}%` }} />
+            </div>
+            <div className="onboarding-sticky__row">
+              <div className="small">Выбрано: {selectedCount} / {minSelect}</div>
+              <button
+                type="button"
+                className="icon-btn icon-btn--reset"
+                onClick={resetSelected}
+                disabled={selectedCount === 0 || saving}
+                aria-label="Сбросить выбор"
+                title="Сбросить выбор"
+              >
+                ↺
+              </button>
+            </div>
+          </div>
+          <button className="btn btn--primary" onClick={save} disabled={saving || selectedCount < minSelect}>
+            {saving ? 'Сохраняю…' : selectedCount < minSelect ? `Нужно ещё ${minSelect - selectedCount}` : `Хватит, продолжить (${selectedCount})`}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

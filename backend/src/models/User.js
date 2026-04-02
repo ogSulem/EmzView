@@ -6,6 +6,8 @@ const userSchema = new mongoose.Schema(
     passwordHash: { type: String, required: true },
     name: { type: String, required: true },
     telegramUserId: { type: Number, default: null, index: true },
+    passwordResetTokenHash: { type: String, default: null },
+    passwordResetExpiresAt: { type: Date, default: null },
     onboarding: {
       favoriteMovieTmdbIds: { type: [Number], default: [] },
       favoriteTvTmdbIds: { type: [Number], default: [] },
